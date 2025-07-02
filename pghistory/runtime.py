@@ -11,8 +11,10 @@ from pghistory import config, utils
 
 if utils.psycopg_maj_version == 2:
     import psycopg2.extensions
+    from psycopg2.sql import Composable
 elif utils.psycopg_maj_version == 3:
     import psycopg.pq
+    from psycopg.sql import Composable
 else:
     raise AssertionError
 
@@ -86,13 +88,22 @@ def _execute_wrapper(execute_result):
 
 
 def _inject_history_context(
-    execute, sql: Union[str, bytes], params: Union[Dict[str, Any], Tuple[Any, ...]], many, context
+    execute,
+    sql: Union[str, bytes | Composable],
+    params: Union[Dict[str, Any], Tuple[Any, ...]],
+    many,
+    context,
 ):
-    is_bytes = isinstance(sql, bytes)
-    sql = sql.decode() if is_bytes else sql
+    if isinstance(sql, bytes):
+        sql_string = sql.decode()
+    elif isinstance(sql, Composable):
+        sql_string = sql.as_string(context["connection"])
+    else:
+        sql_string = sql
+
     inject_vars = ""
 
-    if _can_inject_variable(context["cursor"], sql):
+    if _can_inject_variable(context["cursor"], sql_string):
         # Metadata is stored as a serialized JSON string with escaped
         # single quotes
         serialized_metadata = json.dumps(_tracker.value.metadata, cls=config.json_encoder())
@@ -117,9 +128,8 @@ def _inject_history_context(
             f"set_config('pghistory.context_metadata', {metadata_placeholder}, true); "
         )
 
-    sql = inject_vars + sql
-    sql = sql.encode() if is_bytes else sql
-    return _execute_wrapper(execute(sql, params, many, context))
+    modified_sql = inject_vars + sql_string
+    return _execute_wrapper(execute(modified_sql, params, many, context))
 
 
 class context(contextlib.ContextDecorator):
